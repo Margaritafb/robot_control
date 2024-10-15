@@ -1,0 +1,36 @@
+running egg_info
+creating build/robot_control/robot_control.egg-info
+writing build/robot_control/robot_control.egg-info/PKG-INFO
+writing dependency_links to build/robot_control/robot_control.egg-info/dependency_links.txt
+writing entry points to build/robot_control/robot_control.egg-info/entry_points.txt
+writing requirements to build/robot_control/robot_control.egg-info/requires.txt
+writing top-level names to build/robot_control/robot_control.egg-info/top_level.txt
+writing manifest file 'build/robot_control/robot_control.egg-info/SOURCES.txt'
+reading manifest file 'build/robot_control/robot_control.egg-info/SOURCES.txt'
+adding license file 'LICENSE'
+writing manifest file 'build/robot_control/robot_control.egg-info/SOURCES.txt'
+running build
+running build_py
+creating /home/margaritaf99/robot_control/build/robot_control/build
+creating /home/margaritaf99/robot_control/build/robot_control/build/lib
+creating /home/margaritaf99/robot_control/build/robot_control/build/lib/robot_control
+copying robot_control/robot.py -> /home/margaritaf99/robot_control/build/robot_control/build/lib/robot_control
+copying robot_control/__init__.py -> /home/margaritaf99/robot_control/build/robot_control/build/lib/robot_control
+running install
+running install_lib
+creating /home/margaritaf99/robot_control/install/robot_control/lib/python3.12/site-packages/robot_control
+copying /home/margaritaf99/robot_control/build/robot_control/build/lib/robot_control/robot.py -> /home/margaritaf99/robot_control/install/robot_control/lib/python3.12/site-packages/robot_control
+copying /home/margaritaf99/robot_control/build/robot_control/build/lib/robot_control/__init__.py -> /home/margaritaf99/robot_control/install/robot_control/lib/python3.12/site-packages/robot_control
+byte-compiling /home/margaritaf99/robot_control/install/robot_control/lib/python3.12/site-packages/robot_control/robot.py to robot.cpython-312.pyc
+byte-compiling /home/margaritaf99/robot_control/install/robot_control/lib/python3.12/site-packages/robot_control/__init__.py to __init__.cpython-312.pyc
+running install_data
+creating /home/margaritaf99/robot_control/install/robot_control/share/ament_index
+creating /home/margaritaf99/robot_control/install/robot_control/share/ament_index/resource_index
+creating /home/margaritaf99/robot_control/install/robot_control/share/ament_index/resource_index/packages
+copying resource/robot_control -> /home/margaritaf99/robot_control/install/robot_control/share/ament_index/resource_index/packages
+copying package.xml -> /home/margaritaf99/robot_control/install/robot_control/share/robot_control
+running install_egg_info
+Copying build/robot_control/robot_control.egg-info to /home/margaritaf99/robot_control/install/robot_control/lib/python3.12/site-packages/robot_control-0.0.0-py3.12.egg-info
+running install_scripts
+Installing robot script to /home/margaritaf99/robot_control/install/robot_control/lib/robot_control
+writing list of installed files to '/home/margaritaf99/robot_control/build/robot_control/install.log'
