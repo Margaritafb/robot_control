@@ -80,6 +80,9 @@ class Robot_controller(Node):
         # Parámetros
         self.delta = 0.4  # Distancia crítica para evitar obstáculos
         self.epsilon = 0.4  # Distancia de parada al objetivo
+        self.gamma = 0.1  # Holgura para las condiciones de transición
+        self.fw_c_min_time = 0.5  # Tiempo mínimo en FW_C (en segundos)
+        self.fw_c_start_time = None  # Momento en que entramos a FW_C
         
         # Instanciar el controlador PID para la velocidad angular en ir hacia la meta
         self.pid_controller = PIDController(Kp=3.0, Ki=0.0, Kd=0.00, dt=0.1)
@@ -127,8 +130,8 @@ class Robot_controller(Node):
         angulo_medio = (angle_max + angle_min) / 2.0
         index = int((angulo_medio - angle_min) / angle_increment)
         
-        # Definir un rango de +/- 20 grados alrededor del frente
-        range_front = int(np.radians(20) / angle_increment)
+        # Definir un rango de +/- 5 grados alrededor del frente
+        range_front = int(np.radians(5) / angle_increment)
 
         # Extraer las distancias en el rango de interés
         front_angle_indices = range(max(0, index - range_front), 
@@ -173,7 +176,7 @@ class Robot_controller(Node):
         u_AO_y = math.sin(self.min_angle)
         
         # Calcular ángulo de evitación perpendicular al obstáculo
-        avoid_angle = math.atan2(u_AO_y, u_AO_x) + math.pi  # Girar 180° para alejarse
+        avoid_angle = math.atan2(u_AO_y, u_AO_x) + 0.5 * math.pi 
         
         # Calcular error de orientación
         error = avoid_angle - self.robot_yaw
@@ -181,15 +184,12 @@ class Robot_controller(Node):
         
         # Control de velocidad
         angular_velocity = float(self.pid_controller.compute(error))
-        
-        # Si estamos bien orientados, avanzar
-        if abs(error) < 0.1:
-            self.cmd_vel.linear.x = 0.2
-        else:
-            self.cmd_vel.linear.x = 0.0
-            
+
+        # Solo girar para alinearse con el ángulo de evitación
+        self.cmd_vel.linear.x = 0.0
         self.cmd_vel.angular.z = angular_velocity
         self.cmd_vel_pub.publish(self.cmd_vel)
+
         self.get_logger().info(f'[Obstacle Control] Girando para alinearse: error = {error:.2f}, angular.z = {angular_velocity:.2f}')
  
     def follow_wall_clockwise(self):
@@ -207,13 +207,14 @@ class Robot_controller(Node):
         
         angular_velocity = float(self.pid_controller.compute(error))
         
-        if abs(error) < 0.1 and abs(self.min_distance_front - self.delta) < 0.3:
-            self.cmd_vel.linear.x = 0.2
+        if abs(error) < 0.1:
+            self.cmd_vel.linear.x = 0.1
+            self.cmd_vel.angular.z = 0.0
         else:
             self.cmd_vel.linear.x = 0.0
-            
-        self.cmd_vel.angular.z = angular_velocity
+            self.cmd_vel.angular.z = angular_velocity
         self.cmd_vel_pub.publish(self.cmd_vel)
+        self.get_logger().info(f'[Obstacle Control] Girando para alinearse: error = {error:.2f}, angular.z = {angular_velocity:.2f}')
         
     def follow_wall_counterclockwise(self):
         if self.min_angle is None or self.robot_yaw is None:
@@ -230,13 +231,15 @@ class Robot_controller(Node):
         
         angular_velocity = float(self.pid_controller.compute(error))
         
-        if abs(error) < 0.1 and abs(self.min_distance_front - self.delta) < 0.3:
-            self.cmd_vel.linear.x = 0.2
+        if abs(error) < 0.1:
+            self.cmd_vel.linear.x = 0.1
+            self.cmd_vel.angular.z = 0.0
         else:
             self.cmd_vel.linear.x = 0.0
-            
-        self.cmd_vel.angular.z = angular_velocity
-        self.cmd_vel_pub.publish(self.cmd_vel)       
+            self.cmd_vel.angular.z = angular_velocity
+        self.cmd_vel_pub.publish(self.cmd_vel)
+        self.get_logger().info(f'[Obstacle Control] Girando para alinearse: error = {error:.2f}, angular.z = {angular_velocity:.2f}')
+   
 
     def control_loop(self):
         if not all([self.robot_x, self.robot_y, self.goal_distance, self.min_distance_front]):
@@ -265,13 +268,14 @@ class Robot_controller(Node):
                     self.dt = self.goal_distance
                 
         elif self.state in ['FW_C', 'FW_CC']:
-            if self.min_distance_front < self.delta:
+            if abs(self.min_distance_front - self.delta) <= self.gamma:
                 self.state = 'AO'
-            elif self.goal_distance < self.dt and dot_AO_GTG > 0:
+            elif abs(self.goal_distance - self.dt) <= self.gamma and dot_AO_GTG > 0:
                 self.state = 'GTG'
                 
         elif self.state == 'AO':
-            if self.min_distance_front >= self.delta:
+            self.get_logger().info(f'producto GTG_FW_CC: {dot_GTG_FW_CC}, producto GTG_FW_C: {dot_GTG_FW_C}')
+            if abs(self.min_distance_front - self.delta) <= self.gamma:
                 if dot_GTG_FW_C > 0:
                     self.state = 'FW_C'
                     self.dt = self.goal_distance
@@ -284,8 +288,10 @@ class Robot_controller(Node):
             self.goal_control()
         elif self.state == 'AO':
             self.obstacle_control()
-        elif self.state == 'FW':
-            self.follow_wall_control()
+        elif self.state == 'FW_C':
+            self.follow_wall_clockwise()
+        elif self.state == 'FW_CC':
+            self.follow_wall_counterclockwise()
         elif self.state == 'STOP':
             self.cmd_vel.linear.x = 0.0
             self.cmd_vel.angular.z = 0.0
