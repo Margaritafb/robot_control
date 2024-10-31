@@ -191,7 +191,7 @@ class Robot_controller(Node):
 
         if self.angle_to_goal is not None and self.robot_yaw is not None:
 
-            error = self.angle_to_goal - self.robot_yaw
+            error = self.global_angle_to_goal - self.robot_yaw
             error = math.atan2(math.sin(error), math.cos(error))
 
             # Calcular la salida del controlador PID
@@ -260,15 +260,11 @@ class Robot_controller(Node):
         # Decidir la dirección de seguimiento de pared
         if dot_GTG_FW_C > dot_GTG_FW_CC:
             self.state = 'FW_C'
-            self.follow_wall_angle = math.atan2(u_FW_C_y, u_FW_C_x) + math.radians(90)
-            # Normalización adicional (opcional)
-            self.follow_wall_angle = math.atan2(math.sin(self.follow_wall_angle), math.cos(self.follow_wall_angle))
+            self.follow_wall_angle = math.atan2(u_FW_C_y, u_FW_C_x) - math.radians(90)
             self.get_logger().info(f"Cambiando a estado FW_C (seguir pared en sentido horario), d_t = {self.dt:.2f}")
         elif dot_GTG_FW_CC > dot_GTG_FW_C:
             self.state = 'FW_CC'
             self.follow_wall_angle = math.atan2(u_FW_CC_y, u_FW_CC_x) + math.radians(90)
-            # Normalización adicional (opcional)
-            self.follow_wall_angle = math.atan2(math.sin(self.follow_wall_angle), math.cos(self.follow_wall_angle))
             self.get_logger().info(f"Cambiando a estado FW_CC (seguir pared en sentido antihorario), d_t = {self.dt:.2f}")
 
     def follow_wall_clockwise(self):
@@ -324,12 +320,22 @@ class Robot_controller(Node):
     def control_loop(self):
         if not all([self.robot_x, self.robot_y, self.goal_distance, self.min_distance_to_obstacle]):
             return
-            
+        self.get_logger().info(f"Angle to goal= {self.angle_to_goal:.2f}")  
         # Actualizar distancia al objetivo
+        # Calcular dx y dy en el sistema global
         dx = self.goal_x - self.robot_x
         dy = self.goal_y - self.robot_y
         self.goal_distance = math.sqrt(dx**2 + dy**2)
-        self.angle_to_goal = math.atan2(dy, dx)
+        # Calcular el ángulo hacia el objetivo en coordenadas globales
+        self.global_angle_to_goal = math.atan2(dy, dx)
+        
+        # Ajustar el ángulo hacia el objetivo para que sea relativo al frente del robot
+        # Esto convierte el ángulo en uno relativo al frente del robot
+        self.angle_to_goal = self.global_angle_to_goal - self.robot_yaw
+        self.angle_to_goal = math.atan2(math.sin(self.angle_to_goal), math.cos(self.angle_to_goal))  # Normalizar entre [-pi, pi]
+
+        # Log para verificar el valor del ángulo relativo
+        self.get_logger().info(f"Yaw respecto al marco odometry = {self.robot_yaw:.2f}")
         
         # Transiciones de estados
         if self.state == 'GTG':
