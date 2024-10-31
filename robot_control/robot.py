@@ -69,8 +69,11 @@ class Robot_controller(Node):
         self.robot_x = None
         self.robot_y = None
         self.robot_yaw = None
-        self.min_distance_front = None
-        self.min_angle = None
+        self.min_distance_to_obstacle = None
+        self.min_angle_to_obstacle = None
+        self.follow_wall_angle = None
+        self.obstacle_distance = None
+        self.ao_obstacle_angle = None
         self.cmd_vel = Twist()
         
         # Estado del sistema
@@ -78,11 +81,10 @@ class Robot_controller(Node):
         self.dt = None      # Distancia al objetivo al entrar en FW
         
         # Parámetros
-        self.delta = 0.4  # Distancia crítica para evitar obstáculos
-        self.epsilon = 0.4  # Distancia de parada al objetivo
-        self.gamma = 0.1  # Holgura para las condiciones de transición
-        self.fw_c_min_time = 0.5  # Tiempo mínimo en FW_C (en segundos)
-        self.fw_c_start_time = None  # Momento en que entramos a FW_C
+        self.delta = 0.3  # Distancia crítica para evitar obstáculos
+        self.epsilon = 0.3  # Distancia de parada al objetivo
+        self.gamma = 0.15  # Holgura para las condiciones de transición
+        self.fw_initialized = False  # Bandera para inicializar u_FW solo una vez al entrar en FW
         
         # Instanciar el controlador PID para la velocidad angular en ir hacia la meta
         self.pid_controller = PIDController(Kp=3.0, Ki=0.0, Kd=0.00, dt=0.1)
@@ -112,46 +114,80 @@ class Robot_controller(Node):
             self.goal_distance = math.sqrt(dx**2 + dy**2)
             # Calcular el ángulo hacia el objetivo relativo a la orientación del robot
             self.angle_to_goal = math.atan2(dy, dx)
-            self.get_logger().info(f'Alcanzado el objetivo, distancia: {self.goal_distance:.2f}')
             
     def lidar_callback(self, msg):
         self.current_scan = msg
         if self.current_scan is None or self.goal_distance is None:
             return
-        
+
         # Procesar datos del LiDAR
         ranges = np.array(self.current_scan.ranges)
         angle_min = self.current_scan.angle_min
         angle_max = self.current_scan.angle_max
         angle_increment = self.current_scan.angle_increment
-        
-        # Calcular el índice correspondiente al frente del robot)
+
+        # Calcular el índice correspondiente al frente del robot
         measures = len(ranges)
         angulo_medio = (angle_max + angle_min) / 2.0
         index = int((angulo_medio - angle_min) / angle_increment)
-        
+
         # Definir un rango de +/- 5 grados alrededor del frente
         range_front = int(np.radians(5) / angle_increment)
 
-        # Extraer las distancias en el rango de interés
+        # Extraer las distancias en el rango de interés alrededor del frente
         front_angle_indices = range(max(0, index - range_front), 
-                                min(measures, index + range_front))
-        
-        # Filtrar las distancias válidas
-        valid_distances = [(ranges[i], angle_min + i * angle_increment) 
-                       for i in front_angle_indices if ranges[i] > 0]
+                                    min(measures, index + range_front))
 
-        # Calcular la distancia mínima en el rango seleccionado
+        # Filtrar las distancias válidas con sus ángulos relativos
+        valid_distances = [(ranges[i], angle_min + i * angle_increment) 
+                           for i in front_angle_indices if ranges[i] > 0]
+
+        # Calcular la distancia mínima y el ángulo al obstáculo más cercano en el rango
         if valid_distances:
-            self.min_distance_front, self.min_angle = min(valid_distances, key=lambda x: x[0])
+            self.min_distance_to_obstacle, self.min_angle_to_obstacle = min(valid_distances, key=lambda x: x[0])
         else:
-            self.min_distance_front = float('inf')
-            self.min_angle = None            
+            self.min_distance_to_obstacle = float('inf')
+            self.min_angle_to_obstacle = None  # Indicar que no hay obstáculos detectados en el rango
+
+        # Asegurarse de que el ángulo esté en el rango [-pi, pi] 
+        if self.min_angle_to_obstacle is not None:
+            self.min_angle_to_obstacle = math.atan2(math.sin(self.min_angle_to_obstacle), math.cos(self.min_angle_to_obstacle))
+
+        
+    def get_distance_at_angle(self, target_angle):
+        """
+        Devuelve la distancia mínima al obstáculo en un rango de ±5 grados alrededor de un ángulo específico relativo al robot.
+        :param target_angle: Ángulo en radianes (relativo al frente del robot).
+        :return: Distancia mínima al obstáculo en el rango de ±5 grados alrededor del ángulo dado.
+        """
+        if self.current_scan is None:
+            return float('inf')  # Si no hay datos de LiDAR, devuelve infinito
+
+        # Obtener los parámetros del LiDAR
+        ranges = np.array(self.current_scan.ranges)
+        angle_min = self.current_scan.angle_min
+        angle_increment = self.current_scan.angle_increment
+
+        # Calcular el índice correspondiente al ángulo deseado
+        angle_offset = target_angle - angle_min
+        center_index = int(angle_offset / angle_increment)
+
+        # Definir un rango de ±5 grados alrededor del ángulo deseado
+        range_offset = int(np.radians(5) / angle_increment)
+        start_index = max(0, center_index - range_offset)
+        end_index = min(len(ranges) - 1, center_index + range_offset)
+
+        # Extraer las distancias en el rango de interés y filtrar las distancias válidas (mayores que 0)
+        valid_distances = [ranges[i] for i in range(start_index, end_index + 1) if ranges[i] > 0]
+
+        # Devolver la distancia mínima en el rango o infinito si no hay mediciones válidas
+        return min(valid_distances) if valid_distances else float('inf')
+     
             
     def goal_control(self):
  
         # Definir la velocidad lineal constante
-        vx = 0.2  
+        vx = 0.3  
 
         if self.angle_to_goal is not None and self.robot_yaw is not None:
 
@@ -166,128 +202,213 @@ class Robot_controller(Node):
             self.cmd_vel.angular.z = float(angular_velocity)
             self.cmd_vel_pub.publish(self.cmd_vel)
     
-    def obstacle_control(self):
+    def avoid_obstacle_control(self):
         
-        if self.min_angle is None or self.robot_yaw is None:
+        if self.min_angle_to_obstacle is None or self.robot_yaw is None:
             return
-
-        # Calcular vectores unitarios
-        u_AO_x = math.cos(self.min_angle)
-        u_AO_y = math.sin(self.min_angle)
         
-        # Calcular ángulo de evitación perpendicular al obstáculo
-        avoid_angle = math.atan2(u_AO_y, u_AO_x) + 0.5 * math.pi 
+        avoid_angle = self.ao_obstacle_angle + math.pi / 2
+        avoid_angle = math.atan2(math.sin(avoid_angle), math.cos(avoid_angle))
         
-        # Calcular error de orientación
         error = avoid_angle - self.robot_yaw
         error = math.atan2(math.sin(error), math.cos(error))
         
-        # Control de velocidad
         angular_velocity = float(self.pid_controller.compute(error))
-
-        # Solo girar para alinearse con el ángulo de evitación
-        self.cmd_vel.linear.x = 0.0
+        
+        if abs(error) > 0.5:
+            self.cmd_vel.linear.x = 0.0
+        else:
+            self.cmd_vel.linear.x = 0.05
+            
         self.cmd_vel.angular.z = angular_velocity
         self.cmd_vel_pub.publish(self.cmd_vel)
+        
+        self.get_logger().info(f"[AO] Ángulo obstáculo = {self.ao_obstacle_angle:.2f}, "
+                               f"Ángulo evitación = {avoid_angle:.2f}, "
+                               f"Robot yaw = {self.robot_yaw:.2f}, "
+                               f"Error = {error:.2f}, "
+                               f"Velocidad angular = {angular_velocity:.2f}")
 
-        self.get_logger().info(f'[Obstacle Control] Girando para alinearse: error = {error:.2f}, angular.z = {angular_velocity:.2f}')
- 
+        
+    def follow_wall_direction_decision(self, angle_to_goal, angle_to_obstacle):
+        """
+        Decide si el robot debe seguir la pared en sentido horario (FW_C) o antihorario (FW_CC).
+        Utiliza el `angle_to_goal` y `angle_to_obstacle` para determinar la dirección del seguimiento.
+        """
+        self.dt = self.goal_distance  # Guardar la distancia actual al objetivo para referencia
+
+        # Obtener las componentes del vector unitario hacia la meta
+        u_GTG_x = math.cos(angle_to_goal)
+        u_GTG_y = math.sin(angle_to_goal)
+
+        # Obtener las componentes del vector unitario hacia el obstáculo
+        u_AO_x = math.cos(angle_to_obstacle)
+        u_AO_y = math.sin(angle_to_obstacle)
+
+        # Calcular el vector perpendicular para el seguimiento horario (Relativo al frente del robot cuando entro a FW)
+        u_FW_C_x = u_AO_y  # Rotación 90° en sentido horario
+        u_FW_C_y = -u_AO_x
+
+        # Calcular el vector perpendicular para el seguimiento antihorario
+        u_FW_CC_x = -u_AO_y  # Rotación 90° en sentido antihorario
+        u_FW_CC_y = u_AO_x
+
+        # Calcular productos punto para decidir la dirección
+        dot_GTG_FW_C = u_GTG_x * u_FW_C_x + u_GTG_y * u_FW_C_y
+        dot_GTG_FW_CC = u_GTG_x * u_FW_CC_x + u_GTG_y * u_FW_CC_y
+
+        # Decidir la dirección de seguimiento de pared
+        if dot_GTG_FW_C > dot_GTG_FW_CC:
+            self.state = 'FW_C'
+            self.follow_wall_angle = math.atan2(u_FW_C_y, u_FW_C_x) + math.radians(90)
+            # Normalización adicional (opcional)
+            self.follow_wall_angle = math.atan2(math.sin(self.follow_wall_angle), math.cos(self.follow_wall_angle))
+            self.get_logger().info(f"Cambiando a estado FW_C (seguir pared en sentido horario), d_t = {self.dt:.2f}")
+        elif dot_GTG_FW_CC > dot_GTG_FW_C:
+            self.state = 'FW_CC'
+            self.follow_wall_angle = math.atan2(u_FW_CC_y, u_FW_CC_x) + math.radians(90)
+            # Normalización adicional (opcional)
+            self.follow_wall_angle = math.atan2(math.sin(self.follow_wall_angle), math.cos(self.follow_wall_angle))
+            self.get_logger().info(f"Cambiando a estado FW_CC (seguir pared en sentido antihorario), d_t = {self.dt:.2f}")
+
     def follow_wall_clockwise(self):
-        if self.min_angle is None or self.robot_yaw is None:
-            return
-        
-        # Vector perpendicular al obstáculo en sentido horario
-        u_FW_x = math.sin(self.min_angle)  # Rotación 90° en sentido horario
-        u_FW_y = -math.cos(self.min_angle)
-        
-        follow_angle = math.atan2(u_FW_y, u_FW_x)
-        
-        error = follow_angle - self.robot_yaw
-        error = math.atan2(math.sin(error), math.cos(error))
-        
-        angular_velocity = float(self.pid_controller.compute(error))
-        
-        if abs(error) < 0.1:
-            self.cmd_vel.linear.x = 0.1
-            self.cmd_vel.angular.z = 0.0
-        else:
-            self.cmd_vel.linear.x = 0.0
+
+        # Constantes de alineación
+        alineacion_epsilon = 0.05  # Umbral para considerar que el robot está alineado con la pared
+        velocidad_lineal_fw = 0.1  # Velocidad lineal constante al seguir la pared
+
+        # Calcular el error de orientación entre la dirección actual y el follow_wall_angle
+        error = self.follow_wall_angle - self.robot_yaw
+        error = math.atan2(math.sin(error), math.cos(error))  # Normalizar error entre [-pi, pi]
+
+        # Si el error de alineación es mayor que alineacion_epsilon, solo gira (no avanza)
+        if abs(error) > alineacion_epsilon:
+            self.cmd_vel.linear.x = 0.0  # No avanzar hasta estar alineado
+            angular_velocity = self.pid_controller.compute(error)  # Ajustar velocidad angular con PID
             self.cmd_vel.angular.z = angular_velocity
+        else:
+            # Si el robot está alineado, avanza en línea recta y ajusta su orientación para mantener la alineación
+            self.cmd_vel.linear.x = velocidad_lineal_fw
+            angular_velocity = self.pid_controller.compute(error)
+            self.cmd_vel.angular.z = angular_velocity
+
+        # Publicar los comandos de velocidad
         self.cmd_vel_pub.publish(self.cmd_vel)
-        self.get_logger().info(f'[Obstacle Control] Girando para alinearse: error = {error:.2f}, angular.z = {angular_velocity:.2f}')
-        
+        self.get_logger().info(f'[FW_C] Error de alineación = {error:.2f}, angular.z = {angular_velocity:.2f}, linear.x = {self.cmd_vel.linear.x:.2f}')
+
     def follow_wall_counterclockwise(self):
-        if self.min_angle is None or self.robot_yaw is None:
-            return
         
-        # Vector perpendicular al obstáculo en sentido antihorario
-        u_FW_x = -math.sin(self.min_angle)  # Rotación 90° en sentido antihorario
-        u_FW_y = math.cos(self.min_angle)
-        
-        follow_angle = math.atan2(u_FW_y, u_FW_x)
-        
-        error = follow_angle - self.robot_yaw
-        error = math.atan2(math.sin(error), math.cos(error))
-        
-        angular_velocity = float(self.pid_controller.compute(error))
-        
-        if abs(error) < 0.1:
-            self.cmd_vel.linear.x = 0.1
-            self.cmd_vel.angular.z = 0.0
-        else:
-            self.cmd_vel.linear.x = 0.0
+        # Constantes de alineación
+        alineacion_epsilon = 0.05  # Umbral para considerar que el robot está alineado con la pared
+        velocidad_lineal_fw = 0.1  # Velocidad lineal constante al seguir la pared
+
+        # Calcular el error de orientación entre la dirección actual y el follow_wall_angle
+        error = self.follow_wall_angle - self.robot_yaw
+        error = math.atan2(math.sin(error), math.cos(error))  # Normalizar error entre [-pi, pi]
+
+        # Si el error de alineación es mayor que alineacion_epsilon, solo gira (no avanza)
+        if abs(error) > alineacion_epsilon:
+            self.cmd_vel.linear.x = 0.0  # No avanzar hasta estar alineado
+            angular_velocity = self.pid_controller.compute(error)  # Ajustar velocidad angular con PID
             self.cmd_vel.angular.z = angular_velocity
+        else:
+            # Si el robot está alineado, avanza en línea recta y ajusta su orientación para mantener la alineación
+            self.cmd_vel.linear.x = velocidad_lineal_fw
+            angular_velocity = self.pid_controller.compute(error)
+            self.cmd_vel.angular.z = angular_velocity
+
+        # Publicar los comandos de velocidad
         self.cmd_vel_pub.publish(self.cmd_vel)
-        self.get_logger().info(f'[Obstacle Control] Girando para alinearse: error = {error:.2f}, angular.z = {angular_velocity:.2f}')
-   
+        self.get_logger().info(f'[FW_CC] Error de alineación = {error:.2f}, angular.z = {angular_velocity:.2f}, linear.x = {self.cmd_vel.linear.x:.2f}')
 
     def control_loop(self):
-        if not all([self.robot_x, self.robot_y, self.goal_distance, self.min_distance_front]):
+        if not all([self.robot_x, self.robot_y, self.goal_distance, self.min_distance_to_obstacle]):
             return
             
         # Actualizar distancia al objetivo
         dx = self.goal_x - self.robot_x
         dy = self.goal_y - self.robot_y
         self.goal_distance = math.sqrt(dx**2 + dy**2)
-        
-        # Calcular productos punto necesarios
-        dot_GTG_FW_C = self.compute_dot_product_u_GTG_u_FW_clockwise()
-        dot_GTG_FW_CC = self.compute_dot_product_u_GTG_u_FW_counterclockwise()
-        dot_AO_GTG = self.compute_dot_product_u_AO_u_GTG()
+        self.angle_to_goal = math.atan2(dy, dx)
         
         # Transiciones de estados
         if self.state == 'GTG':
             if self.goal_distance <= self.epsilon:
                 self.state = 'STOP'
-            elif self.min_distance_front <= self.delta:
-                if dot_GTG_FW_C > 0:
-                    self.state = 'FW_C'
-                    self.dt = self.goal_distance
-                elif dot_GTG_FW_CC > 0:
-                    self.state = 'FW_CC'
-                    self.dt = self.goal_distance
+                self.get_logger().info("Estado cambiado a STOP, objetivo alcanzado.")
+            elif abs(self.min_distance_to_obstacle - self.delta) < self.gamma:
+                # Si hay un obstáculo cerca, decidir dirección de seguimiento de pared
+                PIDController.reset
+                self.follow_wall_direction_decision(self.angle_to_goal, self.min_angle_to_obstacle)
                 
-        elif self.state in ['FW_C', 'FW_CC']:
-            if abs(self.min_distance_front - self.delta) <= self.gamma:
+        if self.state in ['FW_C', 'FW_CC']:
+            # Verificar la distancia al frente del robot para posible transición a AO
+            front_distance = self.get_distance_at_angle(0.0)  # 0.0 rad es el ángulo al frente
+            self.get_logger().info(f'Distancia frontal en FW: {front_distance:.2f}')
+        #    # Verificar condiciones para volver al estado GTG
+        #    if (self.obstacle_distance > self.delta and
+        #        self.goal_distance < self.dt and
+        #        self.compute_dot_product_u_FW_u_GTG() > 0):
+        #        self.state = 'GTG'
+        #        self.dt = None
+        #        self.follow_wall_angle = None
+        #        self.obstacle_distance = None
+        #        self.get_logger().info("Transición de vuelta a GTG (ir hacia la meta)")
+        #        
+        #   # Verificar condición para cambiar al estado AO solo si la distancia es menor a delta - gamma
+            if front_distance < self.delta:
                 self.state = 'AO'
-            elif abs(self.goal_distance - self.dt) <= self.gamma and dot_AO_GTG > 0:
-                self.state = 'GTG'
+                self.ao_obstacle_angle = self.min_angle_to_obstacle
+                self.dt = None
+                self.follow_wall_angle = None
+                self.obstacle_distance = None
+                PIDController.reset
+                self.get_logger().info("Transición a AO (evitar obstáculo), distancia al obstáculo muy cercana")
                 
         elif self.state == 'AO':
-            self.get_logger().info(f'producto GTG_FW_CC: {dot_GTG_FW_CC}, producto GTG_FW_C: {dot_GTG_FW_C}')
-            if abs(self.min_distance_front - self.delta) <= self.gamma:
-                if dot_GTG_FW_C > 0:
-                    self.state = 'FW_C'
-                    self.dt = self.goal_distance
-                elif dot_GTG_FW_CC > 0:
-                    self.state = 'FW_CC'
-                    self.dt = self.goal_distance
+            # Verificar si el obstáculo en la dirección de `ao_obstacle_angle` está suficientemente lejos
+            avoid_angle = self.ao_obstacle_angle
+            obstacle_distance_in_direction = self.get_distance_at_angle(avoid_angle)
+            
+            self.get_logger().info(f'Ángulo AO: {self.ao_obstacle_angle:.2f}, '
+                                 f'Distancia en dirección evitación: {obstacle_distance_in_direction:.2f}')
+
+            if obstacle_distance_in_direction >= self.delta:
+                # Determinar las rotaciones para alinearse a la pared
+                follow_wall_angle_clockwise = self.ao_obstacle_angle + math.pi/2
+                follow_wall_angle_counterclockwise = self.ao_obstacle_angle - math.pi/2
                 
-        # Ejecutar comportamiento según estado
+                # Normalizar ángulos
+                follow_wall_angle_clockwise = math.atan2(math.sin(follow_wall_angle_clockwise),
+                                                       math.cos(follow_wall_angle_clockwise))
+                follow_wall_angle_counterclockwise = math.atan2(math.sin(follow_wall_angle_counterclockwise),
+                                                              math.cos(follow_wall_angle_counterclockwise))
+                
+                # Calcular rotaciones necesarias
+                rotation_clockwise = abs(math.atan2(math.sin(follow_wall_angle_clockwise - self.robot_yaw),
+                                                  math.cos(follow_wall_angle_clockwise - self.robot_yaw)))
+                rotation_counterclockwise = abs(math.atan2(math.sin(follow_wall_angle_counterclockwise - self.robot_yaw),
+                                                         math.cos(follow_wall_angle_counterclockwise - self.robot_yaw)))
+
+                # Elegir la dirección de menor rotación
+                if rotation_clockwise < rotation_counterclockwise:
+                    self.state = 'FW_C'
+                    self.follow_wall_angle = follow_wall_angle_clockwise
+                else:
+                    self.state = 'FW_CC'
+                    self.follow_wall_angle = follow_wall_angle_counterclockwise
+                
+                self.dt = self.goal_distance
+                self.ao_obstacle_angle = None
+                self.pid_controller.reset()
+                self.get_logger().info(f"Transición desde AO a {self.state}, "
+                                     f"ángulo seguimiento: {self.follow_wall_angle:.2f}")
+    
+    # Ejecución de comportamiento según el estado
         if self.state == 'GTG':
             self.goal_control()
         elif self.state == 'AO':
-            self.obstacle_control()
+            self.avoid_obstacle_control()
         elif self.state == 'FW_C':
             self.follow_wall_clockwise()
         elif self.state == 'FW_CC':
@@ -295,45 +416,16 @@ class Robot_controller(Node):
         elif self.state == 'STOP':
             self.cmd_vel.linear.x = 0.0
             self.cmd_vel.angular.z = 0.0
-            self.cmd_vel_pub.publish(self.cmd_vel)
-            
-        self.get_logger().info(f'Estado: {self.state}, Distancia objetivo: {self.goal_distance:.2f}, '
-                              f'Distancia obstáculo: {self.min_distance_front:.2f}')
-            
-    def compute_dot_product_u_AO_u_GTG(self):
-        if self.angle_to_goal is None or self.min_angle is None:
-            return 0.0
-        # Calcular el producto interno entre u_AO y u_GTG
-        u_AO_x = math.cos(self.min_angle)
-        u_AO_y = math.sin(self.min_angle)
+            self.cmd_vel_pub.publish(self.cmd_vel)     
+    
+    def compute_dot_product_u_FW_u_GTG(self):
         u_GTG_x = math.cos(self.angle_to_goal)
         u_GTG_y = math.sin(self.angle_to_goal)
-        return u_AO_x * u_GTG_x + u_AO_y * u_GTG_y
 
-    def compute_dot_product_u_GTG_u_FW_clockwise(self):
-        if self.angle_to_goal is None or self.min_angle is None:
-            return 0.0
-        
-        u_GTG_x = math.cos(self.angle_to_goal)
-        u_GTG_y = math.sin(self.angle_to_goal)
-        
-        u_FW_x = math.sin(self.min_angle)
-        u_FW_y = -math.cos(self.min_angle)
-        
-        return u_GTG_x * u_FW_x + u_GTG_y * u_FW_y
-    
-    def compute_dot_product_u_GTG_u_FW_counterclockwise(self):
-        if self.angle_to_goal is None or self.min_angle is None:
-            return 0.0
-        
-        u_GTG_x = math.cos(self.angle_to_goal)
-        u_GTG_y = math.sin(self.angle_to_goal)
-        
-        u_FW_x = -math.sin(self.min_angle)
-        u_FW_y = math.cos(self.min_angle)
-        
-        return u_GTG_x * u_FW_x + u_GTG_y * u_FW_y
-    
+        u_FW_x = math.cos(self.follow_wall_angle)
+        u_FW_y = math.sin(self.follow_wall_angle)
+
+        return u_FW_x * u_GTG_x + u_FW_y * u_GTG_y
 
 def main(args=None):            
     rclpy.init(args=args)       
