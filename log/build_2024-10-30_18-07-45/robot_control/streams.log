@@ -1,0 +1,25 @@
+[1.474s] Invoking command in '/home/margaritaf99/robot_control': PYTHONPATH=/home/margaritaf99/robot_control/build/robot_control/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/margaritaf99/robot_control/install/robot_control/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated setup.py egg_info --egg-base build/robot_control build --build-base /home/margaritaf99/robot_control/build/robot_control/build install --record /home/margaritaf99/robot_control/build/robot_control/install.log --single-version-externally-managed install_data
+[1.893s] running egg_info
+[1.917s] writing build/robot_control/robot_control.egg-info/PKG-INFO
+[1.917s] writing dependency_links to build/robot_control/robot_control.egg-info/dependency_links.txt
+[1.918s] writing entry points to build/robot_control/robot_control.egg-info/entry_points.txt
+[1.918s] writing requirements to build/robot_control/robot_control.egg-info/requires.txt
+[1.918s] writing top-level names to build/robot_control/robot_control.egg-info/top_level.txt
+[1.977s] reading manifest file 'build/robot_control/robot_control.egg-info/SOURCES.txt'
+[1.978s] adding license file 'LICENSE'
+[1.978s] writing manifest file 'build/robot_control/robot_control.egg-info/SOURCES.txt'
+[1.978s] running build
+[1.979s] running build_py
+[1.979s] copying robot_control/robot.py -> /home/margaritaf99/robot_control/build/robot_control/build/lib/robot_control
+[1.979s] running install
+[1.990s] running install_lib
+[2.016s] copying /home/margaritaf99/robot_control/build/robot_control/build/lib/robot_control/robot.py -> /home/margaritaf99/robot_control/install/robot_control/lib/python3.12/site-packages/robot_control
+[2.017s] byte-compiling /home/margaritaf99/robot_control/install/robot_control/lib/python3.12/site-packages/robot_control/robot.py to robot.cpython-312.pyc
+[2.024s] running install_data
+[2.025s] running install_egg_info
+[2.058s] removing '/home/margaritaf99/robot_control/install/robot_control/lib/python3.12/site-packages/robot_control-0.0.0-py3.12.egg-info' (and everything under it)
+[2.059s] Copying build/robot_control/robot_control.egg-info to /home/margaritaf99/robot_control/install/robot_control/lib/python3.12/site-packages/robot_control-0.0.0-py3.12.egg-info
+[2.061s] running install_scripts
+[2.265s] Installing robot script to /home/margaritaf99/robot_control/install/robot_control/lib/robot_control
+[2.268s] writing list of installed files to '/home/margaritaf99/robot_control/build/robot_control/install.log'
+[2.411s] Invoked command in '/home/margaritaf99/robot_control' returned '0': PYTHONPATH=/home/margaritaf99/robot_control/build/robot_control/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/margaritaf99/robot_control/install/robot_control/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated setup.py egg_info --egg-base build/robot_control build --build-base /home/margaritaf99/robot_control/build/robot_control/build install --record /home/margaritaf99/robot_control/build/robot_control/install.log --single-version-externally-managed install_data

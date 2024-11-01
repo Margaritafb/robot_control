@@ -1,28 +1,33 @@
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
-from geometry_msgs.msg import Twist, PoseStamped
+from geometry_msgs.msg import PoseStamped, PointStamped, Twist
 from nav_msgs.msg import Odometry
 import numpy as np
 import math
+import tf2_ros
+from geometry_msgs.msg import TransformStamped
+import tf2_geometry_msgs
 
 class PIDController:
-    def __init__(self, Kp, Ki, Kd, dt):
-        self.Kp = Kp  
-        self.Ki = Ki 
-        self.Kd = Kd  
+    def __init__(self, Kp=1.0, Ki=0.0, Kd=0.1, dt=0.1):
+        self.default_Kp = Kp  
+        self.default_Ki = Ki 
+        self.default_Kd = Kd  
         self.dt = dt  
         self.prev_error = 0.0
         self.integral_error = 0.0
 
-    def compute(self, error):
-        proportional = self.Kp * error
-        
+    def compute(self, error, Kp=None, Ki=None, Kd=None):
+        # Usa los valores proporcionados o los predeterminados
+        Kp = Kp if Kp is not None else self.default_Kp
+        Ki = Ki if Ki is not None else self.default_Ki
+        Kd = Kd if Kd is not None else self.default_Kd
+
+        proportional = Kp * error
         self.integral_error += error * self.dt
-        integral = self.Ki * self.integral_error
-        
-        derivative = self.Kd * (error - self.prev_error) / self.dt
-        
+        integral = Ki * self.integral_error
+        derivative = Kd * (error - self.prev_error) / self.dt
         self.prev_error = error
         
         output = proportional + integral + derivative
@@ -33,308 +38,296 @@ class PIDController:
         self.integral_error = 0.0
 
 
+
 class Robot_controller(Node):
     def __init__(self):
         super().__init__('robot_controller')
         
-        # Topicos a suscribirse
-        self.lidar_sub = self.create_subscription(
-            LaserScan,
-            'scan',
-            self.lidar_callback,
-            10)
-        self.lidar_sub
-        
-        self.pose_sub = self.create_subscription(
-            PoseStamped,
-            'goal_pose',
-            self.goal_callback,
-            10)
-        self.pose_sub
-        
-        self.odom_sub = self.create_subscription(
-            Odometry,
-            '/odom',
-            self.odom_callback,
-            10)
-        self.odom_sub
-        
-        # Topicos a publicar
+        # Suscripción y publicancion en topicos requeridos
+        self.pose_sub = self.create_subscription(PoseStamped, 'goal_pose', self.goal_callback, 10)
+        self.lidar_sub = self.create_subscription(LaserScan, 'scan', self.lidar_callback, 10)
         self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
         
-        # Almacenamiento de datos
-        self.current_scan = None
-        self.goal_distance = None
-        self.angle_to_goal = None
-        self.robot_x = None
-        self.robot_y = None
-        self.robot_yaw = None
-        self.min_distance_front = None
-        self.min_angle = None
+        # Buffer para las transformaciones
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        
+        # Variables para almacenar la posición de la meta en `odom`
+        self.goal_x_odom = None
+        self.goal_y_odom = None
+        self.goal_x_lidar = None
+
+        # Variables para el cálculo en `lidar_link`
+        self.angulo_meta = None
+        self.distancia_meta = None
+       
+        #Variables para el LiDAR
+        self.distancia_obstaculo_izq = None
+        self.angulo_obstaculo_izq = None
+        self.distancia_obstaculo_frontal = None
+        self.angulo_obstaculo_frontal = None
+        self.distancia_obstaculo_der = None
+        self.angulo_obstaculo_der = None
+        
+        #variables para FW
+        self.initial_angle_to_obstacle = None
+        self.turning = False
+        
+        #Variables para transiciones de estados
+        self.delta = 0.30  # Distancia crítica para activar el seguimiento de pared
+        self.epsilon = 0.05  # Distancia de parada al objetivo
+        self.state = 'GTG'  # Estado inicial de la máquina de estados
+        self.dt = None
+        
+        #Variable para publicar en velocidad
         self.cmd_vel = Twist()
         
-        # Estado del sistema
-        self.state = 'GTG'  # Estados posibles: GTG, AO, FW, STOP
-        self.dt = None      # Distancia al objetivo al entrar en FW
-        
-        # Parámetros
-        self.delta = 0.4  # Distancia crítica para evitar obstáculos
-        self.epsilon = 0.4  # Distancia de parada al objetivo
-        self.gamma = 0.1  # Holgura para las condiciones de transición
-        self.fw_c_min_time = 0.5  # Tiempo mínimo en FW_C (en segundos)
-        self.fw_c_start_time = None  # Momento en que entramos a FW_C
-        
         # Instanciar el controlador PID para la velocidad angular en ir hacia la meta
-        self.pid_controller = PIDController(Kp=3.0, Ki=0.0, Kd=0.00, dt=0.1)
+        self.pid_controller = PIDController(Kp=1.0, Ki=0.0, Kd=0.1, dt=0.1)
         
         self.timer = self.create_timer(0.1, self.control_loop)
 
-    def odom_callback(self, msg):
-        # Obtener la posición actual del robot
-        self.robot_x = msg.pose.pose.position.x
-        self.robot_y = msg.pose.pose.position.y
-        
-        # Obtener la orientación en el plano (yaw) pues el angulo de orientación del topico se encuentra en cuarteniones y hay que pasarlo a un angulo Euler - plano 2d
-        orientation_q = msg.pose.pose.orientation
-        siny_cosp = 2 * (orientation_q.w * orientation_q.z + orientation_q.x * orientation_q.y)
-        cosy_cosp = 1 - 2 * (orientation_q.y * orientation_q.y + orientation_q.z * orientation_q.z)
-        self.robot_yaw = math.atan2(siny_cosp, cosy_cosp)
-
     def goal_callback(self, msg):
-        # Posición del objetivo
-        self.goal_x = msg.pose.position.x
-        self.goal_y = msg.pose.position.y
+        # Guardar la posición de la meta en el marco `odom`
+        self.goal_x_odom = msg.pose.position.x
+        self.goal_y_odom = msg.pose.position.y
+        self.get_logger().info(f"Objetivo registrado en odom: x={self.goal_x_odom}, y={self.goal_y_odom}")
         
-        if self.robot_x is not None and self.robot_y is not None:
-            # Calcular la distancia al objetivo
-            dx = self.goal_x - self.robot_x
-            dy = self.goal_y - self.robot_y
-            self.goal_distance = math.sqrt(dx**2 + dy**2)
-            # Calcular el ángulo hacia el objetivo relativo a la orientación del robot
-            self.angle_to_goal = math.atan2(dy, dx)
-            self.get_logger().info(f'Alcanzado el objetivo, distancia: {self.goal_distance:.2f}')
-            
+    def update_goal(self):
+        if self.goal_x_odom is None or self.goal_y_odom is None:
+            return
+
+        # Crear un punto en el marco `odom` para representar la posición del objetivo
+        goal_point_in_odom = PointStamped()
+        goal_point_in_odom.header.frame_id = "odom"
+        goal_point_in_odom.point.x = self.goal_x_odom
+        goal_point_in_odom.point.y = self.goal_y_odom
+        goal_point_in_odom.point.z = 0.0
+
+        try:
+            # Transformar la posición del objetivo desde `odom` a `lidar_link`
+            goal_point_in_lidar_link = self.tf_buffer.transform(goal_point_in_odom, "lidar_link")
+
+            # Guardar las coordenadas transformadas del objetivo en `lidar_link`
+            self.goal_x_lidar = goal_point_in_lidar_link.point.x
+            goal_y_lidar = goal_point_in_lidar_link.point.y
+
+            # Calcular el ángulo hacia la meta en `lidar_link`
+            self.angulo_meta = math.atan2(goal_y_lidar, self.goal_x_lidar)
+
+            # Calcular la distancia hacia la meta en `lidar_link`
+            self.distancia_meta = math.sqrt(self.goal_x_lidar**2 + goal_y_lidar**2)
+
+            self.get_logger().info(f"Goal en lidar_link: x={self.goal_x_lidar:.2f}, y={goal_y_lidar:.2f}), "
+                                   f"angle_to_goal={self.angulo_meta:.2f}, distance_to_goal={self.distancia_meta:.2f}")
+
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
+            self.get_logger().info("No se pudo transformar el objetivo de 'odom' a 'lidar_link'.")
+
     def lidar_callback(self, msg):
-        self.current_scan = msg
-        if self.current_scan is None or self.goal_distance is None:
-            return
-        
-        # Procesar datos del LiDAR
-        ranges = np.array(self.current_scan.ranges)
-        angle_min = self.current_scan.angle_min
-        angle_max = self.current_scan.angle_max
-        angle_increment = self.current_scan.angle_increment
-        
-        # Calcular el índice correspondiente al frente del robot)
-        measures = len(ranges)
-        angulo_medio = (angle_max + angle_min) / 2.0
-        index = int((angulo_medio - angle_min) / angle_increment)
-        
-        # Definir un rango de +/- 5 grados alrededor del frente
-        range_front = int(np.radians(5) / angle_increment)
-
-        # Extraer las distancias en el rango de interés
-        front_angle_indices = range(max(0, index - range_front), 
-                                min(measures, index + range_front))
-        
-        # Filtrar las distancias válidas
-        valid_distances = [(ranges[i], angle_min + i * angle_increment) 
-                       for i in front_angle_indices if ranges[i] > 0]
-
-        # Calcular la distancia mínima en el rango seleccionado
-        if valid_distances:
-            self.min_distance_front, self.min_angle = min(valid_distances, key=lambda x: x[0])
-        else:
-            self.min_distance_front = float('inf')
-            self.min_angle = None            
-            
-    def goal_control(self):
- 
-        # Definir la velocidad lineal constante
-        vx = 0.2  
-
-        if self.angle_to_goal is not None and self.robot_yaw is not None:
-
-            error = self.angle_to_goal - self.robot_yaw
-            error = math.atan2(math.sin(error), math.cos(error))
-
-            # Calcular la salida del controlador PID
-            angular_velocity = float(self.pid_controller.compute(error))
-
-            # Publicar las velocidades en el tópico cmd_vel
-            self.cmd_vel.linear.x = float(vx)
-            self.cmd_vel.angular.z = float(angular_velocity)
-            self.cmd_vel_pub.publish(self.cmd_vel)
+        # Extraer datos del LiDAR
+        self.angle_min, self.angle_increment = msg.angle_min, msg.angle_increment
+        self.ranges = np.array(msg.ranges)
     
-    def obstacle_control(self):
+        # Calcular los índices correspondientes a -84, 0, y +84 grados
+        index_84_pos = int((math.radians(84) - self.angle_min) / self.angle_increment)
+        index_0 = int((0.0 - self.angle_min) / self.angle_increment)
+        index_84_neg = int((math.radians(-84) - self.angle_min) / self.angle_increment)
+    
+        # Obtener distancias y ángulos en ±84 y 0 grados si están en rango
+        distance_84_pos = self.ranges[index_84_pos] if 0 <= index_84_pos < len(self.ranges) else float('inf')
+        distance_0 = self.ranges[index_0] if 0 <= index_0 < len(self.ranges) else float('inf')
+        distance_84_neg = self.ranges[index_84_neg] if 0 <= index_84_neg < len(self.ranges) else float('inf')
+    
+        # Almacenar y mostrar los resultados
+        self.distancia_obstaculo_izq = math.cos(math.radians(6)) * distance_84_pos
+        #self.angulo_obstaculo_izq = angle_84_pos
+        self.distancia_obstaculo_frontal = distance_0
+        #self.angulo_obstaculo_frontal = angle_0
+        self.distancia_obstaculo_der = math.cos(math.radians(6)) * distance_84_neg
+        #self.angulo_obstaculo_der = angle_84_neg
         
-        if self.min_angle is None or self.robot_yaw is None:
+        angle_0 = 0.0
+        self.angulo_obstaculo_frontal = angle_0
+    
+        # Log de las distancias y ángulos detectados
+        #self.get_logger().info(f"Obstáculo a derecha: distancia = {self.distancia_obstaculo_der:.2f}, dist a 84 = {distance_84_neg}")
+        #self.get_logger().info(f"Obstáculo al frente (0°): distancia = {self.distancia_obstaculo_frontal:.2f}")
+        #self.get_logger().info(f"Obstáculo a la izquierda: distancia = {self.distancia_obstaculo_izq:.2f}, dist a 84 = {distance_84_pos}")
+    
+
+    def goal_control(self):
+        # Asegurarse de que el ángulo y la distancia hacia la meta están calculados
+        if self.angulo_meta is None or self.distancia_meta is None:
             return
 
-        # Calcular vectores unitarios
-        u_AO_x = math.cos(self.min_angle)
-        u_AO_y = math.sin(self.min_angle)
-        
-        # Calcular ángulo de evitación perpendicular al obstáculo
-        avoid_angle = math.atan2(u_AO_y, u_AO_x) + 0.5 * math.pi 
-        
-        # Calcular error de orientación
-        error = avoid_angle - self.robot_yaw
-        error = math.atan2(math.sin(error), math.cos(error))
-        
-        # Control de velocidad
-        angular_velocity = float(self.pid_controller.compute(error))
+        if self.distancia_meta <= self.epsilon:
+                linear_speed = 0.0
+                self.cmd_vel.angular.z = 0.0
+                self.cmd_vel_pub.publish(self.cmd_vel) 
+        else:
+            linear_speed = 0.2
+        angular_velocity = float(self.pid_controller.compute(self.angulo_meta))
 
-        # Solo girar para alinearse con el ángulo de evitación
-        self.cmd_vel.linear.x = 0.0
+        # Establece la velocidad angular basada en el error de orientación
         self.cmd_vel.angular.z = angular_velocity
+        self.cmd_vel.linear.x = linear_speed
         self.cmd_vel_pub.publish(self.cmd_vel)
+        
+        self.get_logger().info("Avanzando hacia la meta")
+        self.get_logger().info(f"Obstáculo a derecha: distancia = {self.distancia_obstaculo_der:.2f}")
+        self.get_logger().info(f"Obstáculo al frente (0°): distancia = {self.distancia_obstaculo_frontal:.2f}")
+        self.get_logger().info(f"Obstáculo a la izquierda: distancia = {self.distancia_obstaculo_izq:.2f}")
+           
+    def follow_wall_decision(self):
+        
+        # Vector hacia la meta (`u_GTG`)
+        u_GTG_x = math.cos(self.angulo_meta)
+        u_GTG_y = math.sin(self.angulo_meta)
 
-        self.get_logger().info(f'[Obstacle Control] Girando para alinearse: error = {error:.2f}, angular.z = {angular_velocity:.2f}')
- 
-    def follow_wall_clockwise(self):
-        if self.min_angle is None or self.robot_yaw is None:
-            return
-        
-        # Vector perpendicular al obstáculo en sentido horario
-        u_FW_x = math.sin(self.min_angle)  # Rotación 90° en sentido horario
-        u_FW_y = -math.cos(self.min_angle)
-        
-        follow_angle = math.atan2(u_FW_y, u_FW_x)
-        
-        error = follow_angle - self.robot_yaw
-        error = math.atan2(math.sin(error), math.cos(error))
-        
-        angular_velocity = float(self.pid_controller.compute(error))
-        
-        if abs(error) < 0.1:
-            self.cmd_vel.linear.x = 0.1
-            self.cmd_vel.angular.z = 0.0
+        # Vector hacia el obstáculo (`u_AO`)
+        u_AO_x = math.cos(self.angulo_obstaculo_frontal)
+        u_AO_y = math.sin(self.angulo_obstaculo_frontal)
+
+        # Calcular `u_FW_C` para el seguimiento horario (rotar `u_AO` -90°)
+        u_FW_C_x = u_AO_y
+        u_FW_C_y = -u_AO_x
+
+        # Calcular `u_FW_CC` para el seguimiento antihorario (rotar `u_AO` +90°)
+        u_FW_CC_x = -u_AO_y
+        u_FW_CC_y = u_AO_x
+
+        # Producto punto con `u_GTG`
+        dot_GTG_FW_C = u_GTG_x * u_FW_C_x + u_GTG_y * u_FW_C_y
+        dot_GTG_FW_CC = u_GTG_x * u_FW_CC_x + u_GTG_y * u_FW_CC_y
+
+        # Decidir dirección de seguimiento de pared
+        if dot_GTG_FW_C > dot_GTG_FW_CC:
+            self.state = 'R_CC'
+            self.get_logger().info("Cambio de estado a R_CC (rotando sentido horario)")
         else:
-            self.cmd_vel.linear.x = 0.0
-            self.cmd_vel.angular.z = angular_velocity
+            self.state = 'R_C'
+            self.get_logger().info("Cambio de estado a R_C (rotando en sentido antihorario)")
+    
+    def rotar_horario(self):
+        
+        if self.distancia_meta <= (self.dt - 2*self.delta) and self.distancia_obstaculo_frontal > 0.2: # and self.goal_x_lidar > 0:
+            self.state = 'GTG'
+            self.dt = None
+        
+        #Empezar a girar en sentido antihorario para alinearse
+        self.cmd_vel.angular.z = -1.2
+        self.cmd_vel.linear.x = 0.05
+        
+        if self.distancia_obstaculo_frontal > self.delta and abs(self.distancia_obstaculo_izq - self.delta) <= 0.02:
+            self.state = 'FW_C'
+
+        # Publicar el comando de velocidad
         self.cmd_vel_pub.publish(self.cmd_vel)
-        self.get_logger().info(f'[Obstacle Control] Girando para alinearse: error = {error:.2f}, angular.z = {angular_velocity:.2f}')
         
-    def follow_wall_counterclockwise(self):
-        if self.min_angle is None or self.robot_yaw is None:
-            return
+        self.get_logger().info("rotar horario")
+        self.get_logger().info(f"vel angular = {self.cmd_vel.angular.z:.2f}, vel linear = {self.cmd_vel.linear.x:.2f}")
         
-        # Vector perpendicular al obstáculo en sentido antihorario
-        u_FW_x = -math.sin(self.min_angle)  # Rotación 90° en sentido antihorario
-        u_FW_y = math.cos(self.min_angle)
+    def rotar_antihorario(self):
         
-        follow_angle = math.atan2(u_FW_y, u_FW_x)
+        if self.distancia_meta <= (self.dt - 2*self.delta) and self.distancia_obstaculo_frontal >= 0.2: # and self.goal_x_lidar > 0:
+            self.state = 'GTG'
+            self.dt = None
         
-        error = follow_angle - self.robot_yaw
-        error = math.atan2(math.sin(error), math.cos(error))
+        #Empezar a girar en sentido horario para alinearse
+        self.cmd_vel.angular.z = 1.2
+        self.cmd_vel.linear.x = 0.05
         
-        angular_velocity = float(self.pid_controller.compute(error))
+        if self.distancia_obstaculo_frontal > self.delta and self.distancia_obstaculo_der <= self.delta:
+            self.state = 'FW_CC'
+
+        # Publicar el comando de velocidad
+        self.cmd_vel_pub.publish(self.cmd_vel)
         
-        if abs(error) < 0.1:
+        self.get_logger().info("rotar antihorario")
+        self.get_logger().info(f"Obstáculo a derecha: distancia = {self.distancia_obstaculo_der:.2f}")
+        self.get_logger().info(f"Obstáculo al frente (0°): distancia = {self.distancia_obstaculo_frontal:.2f}")
+
+    def pared_horario(self):
+        
+        if self.distancia_meta <= (self.dt - 2*self.delta) and self.distancia_obstaculo_frontal >= 0.2: # and self.goal_x_lidar > 0:
+            self.state = 'GTG'
+            self.dt = None
+        
+        elif abs(self.distancia_obstaculo_frontal - self.delta) <= 0.05:
+            self.state = 'R_C'
+        
+        elif self.distancia_obstaculo_izq > self.delta: 
             self.cmd_vel.linear.x = 0.1
+            self.cmd_vel.angular.z = 0.4
+        elif self.distancia_obstaculo_izq < self.delta:
+            self.cmd_vel.linear.x = 0.1
+            self.cmd_vel.angular.z = -0.2
+        else: 
+            self.cmd_vel.linear.x = 0.2
             self.cmd_vel.angular.z = 0.0
-        else:
-            self.cmd_vel.linear.x = 0.0
-            self.cmd_vel.angular.z = angular_velocity
+            
+        # Publicar el comando de velocidad
         self.cmd_vel_pub.publish(self.cmd_vel)
-        self.get_logger().info(f'[Obstacle Control] Girando para alinearse: error = {error:.2f}, angular.z = {angular_velocity:.2f}')
-   
+        self.get_logger().info("pared horario")
+        self.get_logger().info(f"Obstáculo a izquierda: distancia = {self.distancia_obstaculo_izq:.2f}")
+        self.get_logger().info(f"Obstáculo al frente (0°): distancia = {self.distancia_obstaculo_frontal:.2f}")   
+        self.get_logger().info(f"distancia a meta = {self.distancia_meta}")
+        self.get_logger().info(f"dt = {self.dt}") 
+    
+    def pared_antihorario(self):
+        
+        if self.distancia_meta <= (self.dt - 2*self.delta) and self.distancia_obstaculo_frontal >= 0.2: #and self.goal_x_lidar > 0:
+            self.state = 'GTG'
+            self.dt = None
+        
+        elif abs(self.distancia_obstaculo_frontal - self.delta) <= 0.05:
+            self.state = 'R_CC'
+        
+        elif self.distancia_obstaculo_der > self.delta: 
+            self.cmd_vel.linear.x = 0.1
+            self.cmd_vel.angular.z = -0.4
+        elif self.distancia_obstaculo_der < self.delta:
+            self.cmd_vel.linear.x = 0.1
+            self.cmd_vel.angular.z = 0.2
+        else: 
+            self.cmd_vel.linear.x = 0.2
+            self.cmd_vel.angular.z = 0.0
+            
+        # Publicar el comando de velocidad
+        self.cmd_vel_pub.publish(self.cmd_vel)
+        self.get_logger().info("pared antihorario")
+        self.get_logger().info(f"Obstáculo a derecha: distancia = {self.distancia_obstaculo_der:.2f}")
+        self.get_logger().info(f"Obstáculo al frente (0°): distancia = {self.distancia_obstaculo_frontal:.2f}")   
+        self.get_logger().info(f"distancia a meta = {self.distancia_meta}")
+        self.get_logger().info(f"dt = {self.dt}") 
+        
 
     def control_loop(self):
-        if not all([self.robot_x, self.robot_y, self.goal_distance, self.min_distance_front]):
-            return
+
+        self.update_goal()
+        
+        # Máquina de estados finitos
+        if self.state == 'GTG':
             
-        # Actualizar distancia al objetivo
-        dx = self.goal_x - self.robot_x
-        dy = self.goal_y - self.robot_y
-        self.goal_distance = math.sqrt(dx**2 + dy**2)
+            if abs(self.distancia_obstaculo_frontal - self.delta) <= 0.05:
+                self.dt = self.distancia_meta
+                # Hace decision para rotacion
+                self.follow_wall_decision()
+            else:
+                # Continuar yendo hacia la meta
+                self.goal_control()
         
-        # Calcular productos punto necesarios
-        dot_GTG_FW_C = self.compute_dot_product_u_GTG_u_FW_clockwise()
-        dot_GTG_FW_CC = self.compute_dot_product_u_GTG_u_FW_counterclockwise()
-        dot_AO_GTG = self.compute_dot_product_u_AO_u_GTG()
-        
-        # Transiciones de estados
-        if self.state == 'GTG':
-            if self.goal_distance <= self.epsilon:
-                self.state = 'STOP'
-            elif self.min_distance_front <= self.delta:
-                if dot_GTG_FW_C > 0:
-                    self.state = 'FW_C'
-                    self.dt = self.goal_distance
-                elif dot_GTG_FW_CC > 0:
-                    self.state = 'FW_CC'
-                    self.dt = self.goal_distance
-                
-        elif self.state in ['FW_C', 'FW_CC']:
-            if abs(self.min_distance_front - self.delta) <= self.gamma:
-                self.state = 'AO'
-            elif abs(self.goal_distance - self.dt) <= self.gamma and dot_AO_GTG > 0:
-                self.state = 'GTG'
-                
-        elif self.state == 'AO':
-            self.get_logger().info(f'producto GTG_FW_CC: {dot_GTG_FW_CC}, producto GTG_FW_C: {dot_GTG_FW_C}')
-            if abs(self.min_distance_front - self.delta) <= self.gamma:
-                if dot_GTG_FW_C > 0:
-                    self.state = 'FW_C'
-                    self.dt = self.goal_distance
-                elif dot_GTG_FW_CC > 0:
-                    self.state = 'FW_CC'
-                    self.dt = self.goal_distance
-                
-        # Ejecutar comportamiento según estado
-        if self.state == 'GTG':
-            self.goal_control()
-        elif self.state == 'AO':
-            self.obstacle_control()
+        elif self.state == 'R_C':
+            self.rotar_horario()
+        elif self.state == 'R_CC':
+            self.rotar_antihorario()
         elif self.state == 'FW_C':
-            self.follow_wall_clockwise()
+            self.pared_horario()
         elif self.state == 'FW_CC':
-            self.follow_wall_counterclockwise()
-        elif self.state == 'STOP':
-            self.cmd_vel.linear.x = 0.0
-            self.cmd_vel.angular.z = 0.0
-            self.cmd_vel_pub.publish(self.cmd_vel)
-            
-        self.get_logger().info(f'Estado: {self.state}, Distancia objetivo: {self.goal_distance:.2f}, '
-                              f'Distancia obstáculo: {self.min_distance_front:.2f}')
-            
-    def compute_dot_product_u_AO_u_GTG(self):
-        if self.angle_to_goal is None or self.min_angle is None:
-            return 0.0
-        # Calcular el producto interno entre u_AO y u_GTG
-        u_AO_x = math.cos(self.min_angle)
-        u_AO_y = math.sin(self.min_angle)
-        u_GTG_x = math.cos(self.angle_to_goal)
-        u_GTG_y = math.sin(self.angle_to_goal)
-        return u_AO_x * u_GTG_x + u_AO_y * u_GTG_y
+            self.pared_antihorario()
 
-    def compute_dot_product_u_GTG_u_FW_clockwise(self):
-        if self.angle_to_goal is None or self.min_angle is None:
-            return 0.0
         
-        u_GTG_x = math.cos(self.angle_to_goal)
-        u_GTG_y = math.sin(self.angle_to_goal)
-        
-        u_FW_x = math.sin(self.min_angle)
-        u_FW_y = -math.cos(self.min_angle)
-        
-        return u_GTG_x * u_FW_x + u_GTG_y * u_FW_y
-    
-    def compute_dot_product_u_GTG_u_FW_counterclockwise(self):
-        if self.angle_to_goal is None or self.min_angle is None:
-            return 0.0
-        
-        u_GTG_x = math.cos(self.angle_to_goal)
-        u_GTG_y = math.sin(self.angle_to_goal)
-        
-        u_FW_x = -math.sin(self.min_angle)
-        u_FW_y = math.cos(self.min_angle)
-        
-        return u_GTG_x * u_FW_x + u_GTG_y * u_FW_y
-    
-
 def main(args=None):            
     rclpy.init(args=args)       
     node = Robot_controller()   
